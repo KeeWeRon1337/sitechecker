@@ -1,13 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 main.py — Загрузчик (Launcher).
-Этот файл входит в APK и никогда не меняется.
-Вся логика приложения живёт в app.py, который обновляется с GitHub.
 """
 
 import os
 import sys
 import threading
+import ssl
+
+# ✅ ИСПРАВЛЕНО: настраиваем SSL через certifi ДО любых сетевых запросов
+try:
+    import certifi
+    ssl._create_default_https_context = ssl.create_default_context
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+    os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+except ImportError:
+    # Если certifi нет — отключаем проверку SSL (не рекомендуется)
+    ssl._create_default_https_context = ssl._create_unverified_context
+
 import urllib.request
 
 from kivy.app import App
@@ -21,24 +31,20 @@ from kivy.metrics import dp
 
 # ─── Конфиг ───────────────────────────────────────────────────────────────────
 
-# Ваш GitHub: поменяйте на свой username и repo
-GITHUB_USER = "KeeWeRon1337"
-GITHUB_REPO = "sitechecker"
+GITHUB_USER   = "KeeWeRon1337"
+GITHUB_REPO   = "sitechecker"
 GITHUB_BRANCH = "main"
 
-RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}"
+RAW_BASE    = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}"
 VERSION_URL = f"{RAW_BASE}/version.txt"
 APP_URL     = f"{RAW_BASE}/app.py"
 
-# Папка данных приложения — сюда можно писать на Android
 APP_DIR     = os.path.dirname(os.path.abspath(__file__))
 LOCAL_APP   = os.path.join(APP_DIR, "app_downloaded.py")
 LOCAL_VER   = os.path.join(APP_DIR, "version_downloaded.txt")
 
-# Встроенная версия (версия загрузчика)
 BUILTIN_VERSION = "1.0"
 
-# Цвета
 CLR_BG     = (0.07, 0.08, 0.10, 1)
 CLR_ACCENT = (0.22, 0.68, 0.87, 1)
 CLR_TEXT   = (0.92, 0.93, 0.95, 1)
@@ -51,7 +57,6 @@ CLR_BTN    = (0.22, 0.68, 0.87, 1)
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 
 def get_local_version():
-    """Возвращает версию скачанного app.py (или None если не скачан)."""
     if os.path.exists(LOCAL_VER):
         try:
             with open(LOCAL_VER, "r") as f:
@@ -62,18 +67,43 @@ def get_local_version():
 
 
 def fetch_remote_version():
-    """Скачивает version.txt с GitHub. Возвращает строку или None."""
+    """✅ ИСПРАВЛЕНО: явно передаём SSL-контекст"""
     try:
-        with urllib.request.urlopen(VERSION_URL, timeout=8) as r:
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            VERSION_URL,
+            headers={"User-Agent": "SiteChecker/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
             return r.read().decode().strip()
-    except Exception:
+    except Exception as e:
+        print(f"[fetch_remote_version] Ошибка: {e}")
         return None
 
 
 def download_app():
-    """Скачивает app.py с GitHub. Возвращает (success: bool, error: str)."""
+    """✅ ИСПРАВЛЕНО: явно передаём SSL-контекст"""
     try:
-        with urllib.request.urlopen(APP_URL, timeout=15) as r:
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            APP_URL,
+            headers={"User-Agent": "SiteChecker/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
             code = r.read()
         with open(LOCAL_APP, "wb") as f:
             f.write(code)
@@ -91,7 +121,6 @@ def save_version(version):
 
 
 def launch_app():
-    """Запускает скачанный app.py если он есть, иначе встроенный."""
     if os.path.exists(LOCAL_APP):
         ns = {"__file__": LOCAL_APP, "__name__": "__main__"}
         try:
@@ -116,13 +145,11 @@ class LoaderScreen(BoxLayout):
         self.bind(pos=lambda *_: setattr(self._bg, "pos", self.pos),
                   size=lambda *_: setattr(self._bg, "size", self.size))
 
-        # Заголовок
         self.add_widget(Label(
             text="SiteChecker", font_size=dp(28), bold=True,
             color=CLR_ACCENT, size_hint_y=None, height=dp(44)
         ))
 
-        # Версия
         local_ver = get_local_version() or BUILTIN_VERSION
         self.lbl_version = Label(
             text=f"Версия: {local_ver}",
@@ -131,18 +158,14 @@ class LoaderScreen(BoxLayout):
         )
         self.add_widget(self.lbl_version)
 
-        # Статус
         self.lbl_status = Label(
             text="Проверка обновлений...",
             font_size=dp(14), color=CLR_TEXT,
             size_hint_y=None, height=dp(32)
         )
         self.add_widget(self.lbl_status)
-
-        # Спейсер
         self.add_widget(Label(size_hint_y=1))
 
-        # Кнопка запуска
         self.btn_launch = Button(
             text="Запустить приложение",
             font_size=dp(15), bold=True,
@@ -154,7 +177,6 @@ class LoaderScreen(BoxLayout):
         self.btn_launch.bind(on_press=self._on_launch)
         self.add_widget(self.btn_launch)
 
-        # Кнопка обновления
         self.btn_update = Button(
             text="Обновить с GitHub",
             font_size=dp(13),
@@ -166,13 +188,9 @@ class LoaderScreen(BoxLayout):
         self.btn_update.bind(on_press=self._on_update)
         self.add_widget(self.btn_update)
 
-        # Автопроверка при старте
         threading.Thread(target=self._auto_check, daemon=True).start()
 
-    # ── Логика ─────────────────────────────────────────────────────────────
-
     def _auto_check(self):
-        """Фоновая проверка обновлений при старте."""
         remote_ver = fetch_remote_version()
         Clock.schedule_once(lambda dt: self._after_check(remote_ver))
 
@@ -181,20 +199,17 @@ class LoaderScreen(BoxLayout):
         has_app = os.path.exists(LOCAL_APP)
 
         if remote_ver is None:
-            # Нет интернета
             if has_app:
                 self.lbl_status.text = "Нет сети. Запускаем сохранённую версию."
                 self.lbl_status.color = CLR_TEXT
             else:
-                self.lbl_status.text = "Нет сети и нет сохранённой версии.\nПодключитесь к интернету для первого запуска."
+                self.lbl_status.text = "Нет сети и нет сохранённой версии."
                 self.lbl_status.color = CLR_RED
             self.btn_launch.disabled = not has_app
             self.btn_update.disabled = True
             return
 
-        # Есть интернет
         if not has_app or remote_ver != local_ver:
-            # Нужно скачать
             self.lbl_status.text = f"Доступна версия {remote_ver}. Скачиваем..."
             self.lbl_status.color = CLR_ACCENT
             threading.Thread(target=self._do_update,
@@ -235,20 +250,16 @@ class LoaderScreen(BoxLayout):
         App.get_running_app().load_main_app()
 
 
-# ─── Приложение-загрузчик ────────────────────────────────────────────────────
-
-class LauncherApp(App):
+class SiteCheckerLoader(App):
     def build(self):
-        Window.clearcolor = CLR_BG
         self.screen = LoaderScreen()
         return self.screen
 
     def load_main_app(self):
-        """Запускает скачанный app.py поверх загрузчика."""
         if not launch_app():
-            self.screen.lbl_status.text = "Ошибка запуска. Попробуйте обновить."
-            self.screen.lbl_status.color = CLR_RED
+            self.screen.lbl_status.text = "Не удалось запустить app.py"
+            self.screen.lbl_status.color = (0.93, 0.33, 0.36, 1)
 
 
 if __name__ == "__main__":
-    LauncherApp().run()
+    SiteCheckerLoader().run()
