@@ -1,0 +1,33 @@
+name: Build SiteChecker APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container:
+      image: kivy/buildozer:latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache Buildozer
+        uses: actions/cache@v4
+        with:
+          path: /home/user/.buildozer
+          key: buildozer-docker-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-docker-${{ runner.os }}-
+
+      - name: Build APK
+        run: yes | buildozer android debug 2>&1
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SiteChecker-APK
+          path: bin/*.apk
+          retention-days: 30
