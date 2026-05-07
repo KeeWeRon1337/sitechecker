@@ -1,9 +1,15 @@
 name: Build SiteChecker APK
 
 on:
+  # Только ручной запуск через кнопку Run workflow
+  workflow_dispatch:
+
+  # Автосборка ТОЛЬКО если изменились файлы самого APK
   push:
     branches: [ main ]
-  workflow_dispatch:
+    paths:
+      - 'main.py'
+      - 'buildozer.spec'
 
 jobs:
   build:
