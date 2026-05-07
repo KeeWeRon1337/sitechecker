@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-main.py v1.3 — Загрузчик SiteChecker.
-Исправлено: SSL через certifi + несколько CDN зеркал как fallback.
+main.py v1.4 — Загрузчик SiteChecker.
+Исправлено: надёжный запуск app.py через смену root виджета.
 """
 
 import os
 import ssl
-import socket
 import threading
 import urllib.request
 import urllib.error
+import importlib
+import importlib.util
+import sys
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -25,14 +27,10 @@ GITHUB_USER   = "KeeWeRon1337"
 GITHUB_REPO   = "sitechecker"
 GITHUB_BRANCH = "main"
 
-# Несколько источников — пробуем по очереди
 def make_urls(filename):
     return [
-        # jsDelivr CDN (очень надёжный SSL, серверы по всему миру)
         f"https://cdn.jsdelivr.net/gh/{GITHUB_USER}/{GITHUB_REPO}@{GITHUB_BRANCH}/{filename}",
-        # GitHub raw напрямую
         f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}",
-        # GitHub через ghproxy (HTTP прокси без SSL проблем)
         f"http://ghproxy.com/https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}",
     ]
 
@@ -41,7 +39,7 @@ LOCAL_APP = os.path.join(APP_DIR, "app_downloaded.py")
 LOCAL_VER = os.path.join(APP_DIR, "version_downloaded.txt")
 
 BUILTIN_VERSION = "1.0"
-TIMEOUT = 20
+TIMEOUT     = 20
 MAX_RETRIES = 2
 
 CLR_BG      = (0.07, 0.08, 0.10, 1)
@@ -67,68 +65,55 @@ def request_android_permissions():
         pass
 
 
-# ─── SSL контекст ─────────────────────────────────────────────────────────────
+# ─── SSL ──────────────────────────────────────────────────────────────────────
 
 def make_ssl_context():
-    """Пробует certifi, потом системные сертификаты, потом без проверки."""
-    # 1. certifi — самый надёжный способ на Android
     try:
         import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-        return ctx, "certifi"
+        return ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         pass
-    # 2. Стандартный контекст
     try:
-        ctx = ssl.create_default_context()
-        return ctx, "default"
+        return ssl.create_default_context()
     except Exception:
         pass
-    # 3. Без проверки сертификата (последний resort)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    return ctx, "no-verify"
+    return ctx
 
 
-# ─── Загрузка с нескольких зеркал ─────────────────────────────────────────────
+# ─── Сеть ─────────────────────────────────────────────────────────────────────
 
 def fetch_with_fallback(filename, on_progress=None):
-    """
-    Пробует скачать файл поочерёдно с каждого зеркала.
-    Возвращает (bytes | None, error_str).
-    """
-    urls = make_urls(filename)
-    ssl_ctx, ssl_mode = make_ssl_context()
+    urls    = make_urls(filename)
+    ssl_ctx = make_ssl_context()
+    last_err = "нет ответа"
 
     for i, url in enumerate(urls):
         if on_progress:
             on_progress(f"Источник {i+1}/{len(urls)}...")
-
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 req = urllib.request.Request(
-                    url, headers={"User-Agent": "SiteChecker/1.3",
+                    url, headers={"User-Agent": "SiteChecker/1.4",
                                   "Connection": "close"})
                 if url.startswith("https://"):
                     handler = urllib.request.HTTPSHandler(context=ssl_ctx)
                     opener  = urllib.request.build_opener(handler)
                 else:
                     opener = urllib.request.build_opener()
-
                 with opener.open(req, timeout=TIMEOUT) as r:
-                    data = r.read()
-                return data, None
-
+                    return r.read(), None
             except urllib.error.HTTPError as e:
-                err = f"HTTP {e.code} от {url}"
-                break  # следующее зеркало
+                last_err = f"HTTP {e.code} ({url})"
+                break
             except Exception as e:
-                err = str(e)
+                last_err = str(e)
                 if attempt < MAX_RETRIES:
                     import time; time.sleep(2)
 
-    return None, err
+    return None, last_err
 
 
 def fetch_remote_version(on_progress=None):
@@ -172,17 +157,21 @@ def save_version(v):
 
 # ─── Запуск app.py ────────────────────────────────────────────────────────────
 
-def launch_app():
+def load_app_module():
+    """
+    Загружает app_downloaded.py как модуль Python.
+    Возвращает (module | None, error_str).
+    """
     if not os.path.exists(LOCAL_APP):
-        return False, "Файл app.py не найден"
+        return None, "Файл app.py не найден"
     try:
-        ns = {"__file__": LOCAL_APP, "__name__": "__main__"}
-        with open(LOCAL_APP, "r", encoding="utf-8") as f:
-            code = f.read()
-        exec(compile(code, LOCAL_APP, "exec"), ns)
-        return True, ""
+        spec = importlib.util.spec_from_file_location("sitechecker_app", LOCAL_APP)
+        mod  = importlib.util.module_from_spec(spec)
+        sys.modules["sitechecker_app"] = mod
+        spec.loader.exec_module(mod)
+        return mod, ""
     except Exception as e:
-        return False, str(e)
+        return None, str(e)
 
 
 # ─── Экран загрузчика ─────────────────────────────────────────────────────────
@@ -217,8 +206,7 @@ class LoaderScreen(BoxLayout):
 
         self.lbl_detail = Label(
             text="", font_size=dp(11), color=CLR_SUBTEXT,
-            halign="center", valign="middle",
-            size_hint_y=None, height=dp(30))
+            halign="center", size_hint_y=None, height=dp(30))
         self.lbl_detail.bind(
             size=lambda i, v: setattr(i, "text_size", (v[0], None)))
         self.add_widget(self.lbl_detail)
@@ -258,7 +246,6 @@ class LoaderScreen(BoxLayout):
     def _bg_check(self):
         def prog(msg):
             Clock.schedule_once(lambda dt: self._set_detail(msg))
-
         remote_ver, err = fetch_remote_version(on_progress=prog)
         Clock.schedule_once(lambda dt: self._after_check(remote_ver, err))
 
@@ -274,7 +261,7 @@ class LoaderScreen(BoxLayout):
                 self.btn_launch.disabled = False
             else:
                 self._set_status(
-                    f"Не удалось подключиться.\n{err}", CLR_RED)
+                    f"Не удалось подключиться:\n{err}", CLR_RED)
             self.btn_update.disabled = False
             return
 
@@ -315,14 +302,31 @@ class LoaderScreen(BoxLayout):
                 target=self._bg_check, daemon=True).start(), 0.2)
 
     def _on_launch(self, *_):
-        self._set_status("Запускаем...", CLR_ACCENT)
-        Clock.schedule_once(lambda dt: self._do_launch(), 0.15)
+        self.btn_launch.disabled = True
+        self.btn_update.disabled = True
+        self._set_status("Загружаем модуль...", CLR_ACCENT)
+        # Небольшая пауза чтобы UI успел обновиться
+        Clock.schedule_once(lambda dt: self._do_launch(), 0.2)
 
     def _do_launch(self):
-        ok, err = launch_app()
-        if not ok:
-            self._set_status(f"Ошибка запуска:\n{err}", CLR_RED)
+        mod, err = load_app_module()
+        if mod is None:
+            self._set_status(f"Ошибка загрузки модуля:\n{err}", CLR_RED)
             self.btn_launch.disabled = False
+            self.btn_update.disabled = False
+            return
+
+        # Получаем главный экран из модуля и подменяем root
+        try:
+            app      = App.get_running_app()
+            screen   = mod.MainScreen()
+            root     = app.root
+            root.clear_widgets()
+            root.add_widget(screen)
+        except Exception as e:
+            self._set_status(f"Ошибка запуска экрана:\n{e}", CLR_RED)
+            self.btn_launch.disabled = False
+            self.btn_update.disabled = False
 
 
 # ─── Приложение ───────────────────────────────────────────────────────────────
@@ -330,7 +334,10 @@ class LoaderScreen(BoxLayout):
 class LauncherApp(App):
     def build(self):
         Window.clearcolor = CLR_BG
-        return LoaderScreen()
+        # Корневой контейнер — в него подменяем экран при запуске
+        root = BoxLayout()
+        root.add_widget(LoaderScreen())
+        return root
 
 
 if __name__ == "__main__":
