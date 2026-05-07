@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-main.py v1.2 — Загрузчик SiteChecker.
-Исправлено: SSL таймаут, повторные попытки, увеличенные таймауты.
+main.py v1.3 — Загрузчик SiteChecker.
+Исправлено: SSL через certifi + несколько CDN зеркал как fallback.
 """
 
 import os
 import ssl
+import socket
 import threading
 import urllib.request
 import urllib.error
@@ -24,22 +25,25 @@ GITHUB_USER   = "KeeWeRon1337"
 GITHUB_REPO   = "sitechecker"
 GITHUB_BRANCH = "main"
 
-RAW_BASE    = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}"
-VERSION_URL = f"{RAW_BASE}/version.txt"
-APP_URL     = f"{RAW_BASE}/app.py"
+# Несколько источников — пробуем по очереди
+def make_urls(filename):
+    return [
+        # jsDelivr CDN (очень надёжный SSL, серверы по всему миру)
+        f"https://cdn.jsdelivr.net/gh/{GITHUB_USER}/{GITHUB_REPO}@{GITHUB_BRANCH}/{filename}",
+        # GitHub raw напрямую
+        f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}",
+        # GitHub через ghproxy (HTTP прокси без SSL проблем)
+        f"http://ghproxy.com/https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}",
+    ]
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 LOCAL_APP = os.path.join(APP_DIR, "app_downloaded.py")
 LOCAL_VER = os.path.join(APP_DIR, "version_downloaded.txt")
 
 BUILTIN_VERSION = "1.0"
+TIMEOUT = 20
+MAX_RETRIES = 2
 
-# Таймауты и повторы
-CONNECT_TIMEOUT = 30   # секунд на SSL handshake + соединение
-READ_TIMEOUT    = 30   # секунд на чтение данных
-MAX_RETRIES     = 3    # попыток при ошибке
-
-# Цвета
 CLR_BG      = (0.07, 0.08, 0.10, 1)
 CLR_ACCENT  = (0.22, 0.68, 0.87, 1)
 CLR_TEXT    = (0.92, 0.93, 0.95, 1)
@@ -66,68 +70,76 @@ def request_android_permissions():
 # ─── SSL контекст ─────────────────────────────────────────────────────────────
 
 def make_ssl_context():
-    """
-    Создаёт SSL-контекст. На Android сертификаты могут быть недоступны,
-    поэтому пробуем несколько вариантов.
-    """
-    # Вариант 1: стандартный контекст
+    """Пробует certifi, потом системные сертификаты, потом без проверки."""
+    # 1. certifi — самый надёжный способ на Android
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        return ctx, "certifi"
+    except ImportError:
+        pass
+    # 2. Стандартный контекст
     try:
         ctx = ssl.create_default_context()
-        return ctx
+        return ctx, "default"
     except Exception:
         pass
-    # Вариант 2: без проверки сертификата (fallback для старых Android)
+    # 3. Без проверки сертификата (последний resort)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+    return ctx, "no-verify"
 
 
-# ─── Сетевые утилиты ──────────────────────────────────────────────────────────
+# ─── Загрузка с нескольких зеркал ─────────────────────────────────────────────
 
-def fetch_url(url, timeout=CONNECT_TIMEOUT, retries=MAX_RETRIES):
+def fetch_with_fallback(filename, on_progress=None):
     """
-    Скачивает URL с повторными попытками и увеличенным таймаутом.
+    Пробует скачать файл поочерёдно с каждого зеркала.
     Возвращает (bytes | None, error_str).
     """
-    last_err = "неизвестная ошибка"
-    ctx = make_ssl_context()
+    urls = make_urls(filename)
+    ssl_ctx, ssl_mode = make_ssl_context()
 
-    for attempt in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "SiteChecker/1.2",
-                    "Connection": "close",
-                }
-            )
-            handler = urllib.request.HTTPSHandler(context=ctx)
-            opener  = urllib.request.build_opener(handler)
-            with opener.open(req, timeout=timeout) as r:
-                data = r.read()
-            return data, None
-        except urllib.error.HTTPError as e:
-            last_err = f"HTTP {e.code}: {e.reason}"
-            break  # HTTP-ошибки не повторяем
-        except Exception as e:
-            last_err = str(e)
-            if attempt < retries:
-                import time
-                time.sleep(2 * attempt)  # пауза перед следующей попыткой
+    for i, url in enumerate(urls):
+        if on_progress:
+            on_progress(f"Источник {i+1}/{len(urls)}...")
 
-    return None, last_err
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "SiteChecker/1.3",
+                                  "Connection": "close"})
+                if url.startswith("https://"):
+                    handler = urllib.request.HTTPSHandler(context=ssl_ctx)
+                    opener  = urllib.request.build_opener(handler)
+                else:
+                    opener = urllib.request.build_opener()
+
+                with opener.open(req, timeout=TIMEOUT) as r:
+                    data = r.read()
+                return data, None
+
+            except urllib.error.HTTPError as e:
+                err = f"HTTP {e.code} от {url}"
+                break  # следующее зеркало
+            except Exception as e:
+                err = str(e)
+                if attempt < MAX_RETRIES:
+                    import time; time.sleep(2)
+
+    return None, err
 
 
-def fetch_remote_version():
-    data, err = fetch_url(VERSION_URL)
+def fetch_remote_version(on_progress=None):
+    data, err = fetch_with_fallback("version.txt", on_progress)
     if data is not None:
         return data.decode("utf-8").strip(), None
     return None, err
 
 
-def download_app():
-    data, err = fetch_url(APP_URL, timeout=CONNECT_TIMEOUT, retries=MAX_RETRIES)
+def download_app(on_progress=None):
+    data, err = fetch_with_fallback("app.py", on_progress)
     if data is None:
         return False, err
     try:
@@ -138,7 +150,7 @@ def download_app():
         return False, str(e)
 
 
-# ─── Хранилище версии ─────────────────────────────────────────────────────────
+# ─── Версия ───────────────────────────────────────────────────────────────────
 
 def get_local_version():
     try:
@@ -150,12 +162,12 @@ def get_local_version():
     return None
 
 
-def save_version(version):
+def save_version(v):
     try:
         with open(LOCAL_VER, "w", encoding="utf-8") as f:
-            f.write(version)
-    except Exception as e:
-        print(f"[save_version] {e}")
+            f.write(v)
+    except Exception:
+        pass
 
 
 # ─── Запуск app.py ────────────────────────────────────────────────────────────
@@ -178,7 +190,7 @@ def launch_app():
 class LoaderScreen(BoxLayout):
     def __init__(self, **kw):
         super().__init__(orientation="vertical",
-                         padding=dp(30), spacing=dp(14), **kw)
+                         padding=dp(30), spacing=dp(12), **kw)
         with self.canvas.before:
             Color(*CLR_BG)
             self._bg = Rectangle(pos=self.pos, size=self.size)
@@ -187,143 +199,108 @@ class LoaderScreen(BoxLayout):
 
         self.add_widget(Label(
             text="SiteChecker", font_size=dp(30), bold=True,
-            color=CLR_ACCENT, size_hint_y=None, height=dp(48)
-        ))
+            color=CLR_ACCENT, size_hint_y=None, height=dp(46)))
 
         local_ver = get_local_version() or BUILTIN_VERSION
         self.lbl_version = Label(
-            text=f"Версия: {local_ver}",
-            font_size=dp(13), color=CLR_SUBTEXT,
-            size_hint_y=None, height=dp(24)
-        )
+            text=f"Версия: {local_ver}", font_size=dp(13),
+            color=CLR_SUBTEXT, size_hint_y=None, height=dp(22))
         self.add_widget(self.lbl_version)
 
-        self.add_widget(Label(
-            text=f"github.com/{GITHUB_USER}/{GITHUB_REPO}",
-            font_size=dp(11), color=CLR_SUBTEXT,
-            size_hint_y=None, height=dp(20)
-        ))
-
         self.lbl_status = Label(
-            text="Подключаемся к GitHub...",
-            font_size=dp(14), color=CLR_TEXT,
+            text="Инициализация...", font_size=dp(14), color=CLR_TEXT,
             halign="center", valign="middle",
-            size_hint_y=None, height=dp(70)
-        )
+            size_hint_y=None, height=dp(80))
         self.lbl_status.bind(
             size=lambda i, v: setattr(i, "text_size", (v[0], None)))
         self.add_widget(self.lbl_status)
 
-        # Индикатор попытки
-        self.lbl_attempt = Label(
+        self.lbl_detail = Label(
             text="", font_size=dp(11), color=CLR_SUBTEXT,
-            size_hint_y=None, height=dp(20)
-        )
-        self.add_widget(self.lbl_attempt)
+            halign="center", valign="middle",
+            size_hint_y=None, height=dp(30))
+        self.lbl_detail.bind(
+            size=lambda i, v: setattr(i, "text_size", (v[0], None)))
+        self.add_widget(self.lbl_detail)
 
         self.add_widget(Label(size_hint_y=1))
 
         self.btn_launch = Button(
             text="▶  Запустить приложение",
             font_size=dp(15), bold=True,
-            background_color=CLR_BTN,
-            color=(0.04, 0.04, 0.06, 1),
-            size_hint_y=None, height=dp(54),
-            disabled=True
-        )
+            background_color=CLR_BTN, color=(0.04, 0.04, 0.06, 1),
+            size_hint_y=None, height=dp(54), disabled=True)
         self.btn_launch.bind(on_press=self._on_launch)
         self.add_widget(self.btn_launch)
 
         self.btn_update = Button(
             text="🔄  Проверить обновления",
             font_size=dp(13),
-            background_color=(0.18, 0.22, 0.28, 1),
-            color=CLR_TEXT,
-            size_hint_y=None, height=dp(44),
-            disabled=True
-        )
+            background_color=(0.18, 0.22, 0.28, 1), color=CLR_TEXT,
+            size_hint_y=None, height=dp(44), disabled=True)
         self.btn_update.bind(on_press=self._on_update)
         self.add_widget(self.btn_update)
 
         request_android_permissions()
-        # Небольшая задержка — даём Android время поднять сеть
-        Clock.schedule_once(lambda dt: self._start_check(), 1.5)
-
-    # ── Логика ─────────────────────────────────────────────────────────────
+        Clock.schedule_once(lambda dt: self._start_check(), 2.0)
 
     def _set_status(self, text, color=None):
         self.lbl_status.text  = text
         self.lbl_status.color = color or CLR_TEXT
 
-    def _set_attempt(self, text):
-        self.lbl_attempt.text = text
+    def _set_detail(self, text):
+        self.lbl_detail.text = text
 
     def _start_check(self):
-        self._set_status("Проверяем версию на GitHub...", CLR_TEXT)
-        threading.Thread(target=self._auto_check, daemon=True).start()
+        self._set_status("Подключаемся к GitHub...", CLR_TEXT)
+        threading.Thread(target=self._bg_check, daemon=True).start()
 
-    def _auto_check(self):
-        for attempt in range(1, MAX_RETRIES + 1):
-            Clock.schedule_once(
-                lambda dt, a=attempt: self._set_attempt(
-                    f"Попытка {a} из {MAX_RETRIES}..."))
-            remote_ver, err = fetch_remote_version()
-            if remote_ver is not None:
-                Clock.schedule_once(
-                    lambda dt, v=remote_ver: self._after_check(v, None))
-                return
-            if attempt < MAX_RETRIES:
-                import time
-                time.sleep(3)
+    def _bg_check(self):
+        def prog(msg):
+            Clock.schedule_once(lambda dt: self._set_detail(msg))
 
-        Clock.schedule_once(lambda dt: self._after_check(None, err))
+        remote_ver, err = fetch_remote_version(on_progress=prog)
+        Clock.schedule_once(lambda dt: self._after_check(remote_ver, err))
 
     def _after_check(self, remote_ver, err):
-        self._set_attempt("")
+        self._set_detail("")
         local_ver = get_local_version() or BUILTIN_VERSION
         has_app   = os.path.exists(LOCAL_APP)
 
         if remote_ver is None:
             if has_app:
                 self._set_status(
-                    f"Нет связи с GitHub.\nЗапускаем версию {local_ver}.",
-                    CLR_YELLOW
-                )
+                    f"Нет связи.\nЗапускаем версию {local_ver}.", CLR_YELLOW)
                 self.btn_launch.disabled = False
             else:
                 self._set_status(
-                    f"Нет связи с GitHub.\n{err}\n\n"
-                    f"Репозиторий должен быть PUBLIC.",
-                    CLR_RED
-                )
+                    f"Не удалось подключиться.\n{err}", CLR_RED)
             self.btn_update.disabled = False
             return
 
         if not has_app or remote_ver != local_ver:
-            self._set_status(
-                f"Загружаем версию {remote_ver}...", CLR_ACCENT)
+            self._set_status(f"Загружаем версию {remote_ver}...", CLR_ACCENT)
             threading.Thread(
-                target=self._do_update, args=(remote_ver,), daemon=True
+                target=self._bg_update, args=(remote_ver,), daemon=True
             ).start()
         else:
             self._set_status(f"Версия актуальна: {local_ver} ✔", CLR_GREEN)
             self.btn_launch.disabled = False
             self.btn_update.disabled = False
 
-    def _do_update(self, remote_ver):
-        Clock.schedule_once(
-            lambda dt: self._set_attempt("Загружаем app.py..."))
-        success, err = download_app()
+    def _bg_update(self, remote_ver):
+        def prog(msg):
+            Clock.schedule_once(lambda dt: self._set_detail(msg))
+        success, err = download_app(on_progress=prog)
         Clock.schedule_once(
             lambda dt: self._after_update(success, err, remote_ver))
 
     def _after_update(self, success, err, remote_ver):
-        self._set_attempt("")
+        self._set_detail("")
         if success:
             save_version(remote_ver)
             self.lbl_version.text = f"Версия: {remote_ver}"
-            self._set_status(
-                f"Обновлено до версии {remote_ver} ✔", CLR_GREEN)
+            self._set_status(f"Обновлено до {remote_ver} ✔", CLR_GREEN)
         else:
             self._set_status(f"Ошибка загрузки:\n{err}", CLR_RED)
         self.btn_launch.disabled = not os.path.exists(LOCAL_APP)
@@ -333,8 +310,9 @@ class LoaderScreen(BoxLayout):
         self.btn_update.disabled = True
         self.btn_launch.disabled = True
         self._set_status("Подключаемся...", CLR_ACCENT)
-        Clock.schedule_once(lambda dt: threading.Thread(
-            target=self._auto_check, daemon=True).start(), 0.2)
+        Clock.schedule_once(
+            lambda dt: threading.Thread(
+                target=self._bg_check, daemon=True).start(), 0.2)
 
     def _on_launch(self, *_):
         self._set_status("Запускаем...", CLR_ACCENT)
