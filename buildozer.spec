@@ -5,13 +5,10 @@ package.domain = org.sitechecker
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 1.0
-requirements = python3,kivy,android
+requirements = python3,kivy,android,certifi,urllib3
 orientation = portrait
 fullscreen = 0
-
-# Разрешения — формат без пробелов, через запятую
 android.permissions = android.permission.INTERNET, android.permission.ACCESS_NETWORK_STATE
-
 android.api = 33
 android.minapi = 21
 android.ndk = 25b
