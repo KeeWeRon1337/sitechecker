@@ -214,7 +214,7 @@ class LoaderScreen(BoxLayout):
         self.add_widget(Label(size_hint_y=1))
 
         self.btn_launch = Button(
-            text="▶  Запустить приложение",
+            text="Запустить приложение",
             font_size=dp(15), bold=True,
             background_color=CLR_BTN, color=(0.04, 0.04, 0.06, 1),
             size_hint_y=None, height=dp(54), disabled=True)
@@ -222,7 +222,7 @@ class LoaderScreen(BoxLayout):
         self.add_widget(self.btn_launch)
 
         self.btn_update = Button(
-            text="🔄  Проверить обновления",
+            text="Проверить обновления",
             font_size=dp(13),
             background_color=(0.18, 0.22, 0.28, 1), color=CLR_TEXT,
             size_hint_y=None, height=dp(44), disabled=True)
