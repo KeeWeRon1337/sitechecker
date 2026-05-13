@@ -635,50 +635,49 @@ class MainScreen(BoxLayout):
     # ── Шапка ──────────────────────────────────────────────────────────────
 
     def _build_header(self):
+        SIDE_W = dp(100)
         hdr = BoxLayout(orientation="horizontal", size_hint_y=None,
-                        height=dp(52), spacing=dp(6))
+                        height=dp(54), spacing=0)
+
+        # Левый блок — кнопка возврата
+        left = BoxLayout(orientation="vertical", size_hint=(None, 1),
+                         width=SIDE_W, padding=[0, dp(10)])
+        btn_upd = Button(
+            text="< Обновить", font_size=dp(10),
+            background_normal="",
+            background_color=T("secondary"), color=T("subtext"),
+            size_hint=(1, None), height=dp(28))
+        btn_upd.bind(on_press=self._go_to_loader)
+        left.add_widget(btn_upd)
 
         # Центр — название + описание
-        center = BoxLayout(orientation="vertical", size_hint=(1, 1))
+        center = BoxLayout(orientation="vertical", size_hint=(1, 1),
+                           padding=[0, dp(5)])
         t1 = Label(text="SiteChecker", font_size=dp(20), bold=True,
                    color=T("accent"), halign="center", valign="bottom",
-                   size_hint_y=None, height=dp(28))
+                   size_hint_y=None, height=dp(26))
         t2 = Label(text="Проверка доступности сайтов",
                    font_size=dp(10), color=T("subtext"),
                    halign="center", valign="top",
-                   size_hint_y=None, height=dp(16))
+                   size_hint_y=None, height=dp(14))
         for l in (t1, t2):
             l.bind(size=lambda i, v: setattr(i, "text_size", (v[0], None)))
             center.add_widget(l)
 
-        # Правый блок — переключатель темы + кнопка обновления
-        right = BoxLayout(orientation="horizontal",
-                          size_hint=(None, 1), width=dp(120), spacing=dp(6))
-
-        # Переключатель темы — компактный
-        sw_box = BoxLayout(orientation="vertical",
-                           size_hint=(None, 1), width=dp(52))
+        # Правый блок — переключатель темы
+        right = BoxLayout(orientation="vertical", size_hint=(None, 1),
+                          width=SIDE_W, padding=[dp(8), dp(6)], spacing=dp(2))
         self._lbl_theme = Label(
-            text="Light" if _current_theme == "light" else "Dark",
+            text="Светлая" if _current_theme == "light" else "Тёмная",
             font_size=dp(8), color=T("subtext"),
-            size_hint_y=None, height=dp(14), halign="center")
+            size_hint_y=None, height=dp(12), halign="center")
         sw = Switch(active=(_current_theme == "light"),
-                    size_hint=(1, None), height=dp(28))
+                    size_hint=(1, None), height=dp(26))
         sw.bind(active=self._on_theme_switch)
-        sw_box.add_widget(self._lbl_theme)
-        sw_box.add_widget(sw)
+        right.add_widget(self._lbl_theme)
+        right.add_widget(sw)
 
-        # Кнопка обновления приложения
-        btn_upd = Button(
-            text="Обновить", font_size=dp(10), bold=True,
-            background_normal="",
-            background_color=T("secondary"), color=T("btn_text"),
-            size_hint=(None, 1), width=dp(62))
-        btn_upd.bind(on_press=self._go_to_loader)
-
-        right.add_widget(sw_box)
-        right.add_widget(btn_upd)
-
+        hdr.add_widget(left)
         hdr.add_widget(center)
         hdr.add_widget(right)
         self.add_widget(hdr)
@@ -686,7 +685,7 @@ class MainScreen(BoxLayout):
     def _on_theme_switch(self, sw, value):
         new_theme = "light" if value else "dark"
         set_theme(new_theme)
-        self._lbl_theme.text = "Light" if value else "Dark"
+        self._lbl_theme.text = "Светлая" if value else "Тёмная"
         self._data["theme"]  = new_theme
         save_data(self._data)
         Window.clearcolor = T("bg")
