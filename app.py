@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-app.py v1.5 — SiteChecker
-Исправлено: верстка строк, тап только по названию сайта,
-колонки выровнены, текст не переносится.
+app.py v1.7 — SiteChecker
+Нововведения: перемещение папок и сайтов вверх/вниз, перенос сайта
+между папками, кнопка обновления прямо в приложении, новая шапка
+(центр + тема справа), кнопка "+ Папка" внизу.
 """
 
 import socket
@@ -21,6 +22,7 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.popup import Popup
 from kivy.uix.switch import Switch
+from kivy.uix.spinner import Spinner
 from kivy.graphics import Color, Rectangle, RoundedRectangle
 from kivy.clock import Clock
 from kivy.core.window import Window
@@ -45,7 +47,7 @@ THEMES = {
         "btn_text":  (0.90, 0.93, 0.95, 1),
         "del":       (0.65, 0.15, 0.18, 1),
         "secondary": (0.18, 0.22, 0.28, 1),
-        "host_btn":  (0.18, 0.22, 0.30, 1),
+        "move":      (0.18, 0.22, 0.30, 1),
     },
     "light": {
         "bg":        (0.93, 0.94, 0.96, 1),
@@ -62,7 +64,7 @@ THEMES = {
         "btn_text":  (0.95, 0.97, 1.00, 1),
         "del":       (0.85, 0.18, 0.22, 1),
         "secondary": (0.75, 0.79, 0.86, 1),
-        "host_btn":  (0.82, 0.87, 0.95, 1),
+        "move":      (0.78, 0.83, 0.92, 1),
     },
 }
 
@@ -167,85 +169,94 @@ def make_popup(title, content, size=(dp(300), dp(200))):
     )
 
 
-# ─── Строка сайта ─────────────────────────────────────────────────────────────
-#
-# Макет строки (фиксированные dp-ширины, не size_hint):
-#
-# |-- btn_host (dp(110)) --|- lbl_sent (dp(52)) -|- lbl_recv (dp(52)) -|- lbl_ms (dp(72)) -|- btn_del (dp(36)) -|
-#
-# btn_host — кнопка с названием сайта, тап = одиночная проверка
-# Все колонки фиксированы → текст не переносится, колонки не съезжают
+# ─── Константы вёрстки ────────────────────────────────────────────────────────
 
-ROW_H       = dp(46)
-W_HOST      = dp(110)
-W_SENT      = dp(52)
-W_RECV      = dp(52)
-W_MS        = dp(72)
-W_DEL       = dp(36)
+ROW_H  = dp(46)
+W_MOVE = dp(22)   # кнопки ↑↓
+W_HOST = dp(100)
+W_SENT = dp(48)
+W_RECV = dp(48)
+W_MS   = dp(66)
+W_DEL  = dp(34)
+
+
+# ─── Строка сайта ─────────────────────────────────────────────────────────────
 
 class SiteRow(BoxLayout):
-    def __init__(self, host, on_delete, **kw):
+    def __init__(self, host, on_delete, on_move, on_move_to_folder,
+                 get_folder_names, **kw):
         super().__init__(
             orientation="horizontal",
             size_hint=(1, None), height=ROW_H,
-            padding=[dp(6), dp(5)], spacing=dp(4),
-            **kw)
-        self.host      = host
-        self.on_delete = on_delete
-        self._checking = False
+            padding=[dp(4), dp(4)], spacing=dp(3), **kw)
+        self.host             = host
+        self.on_delete        = on_delete
+        self.on_move          = on_move           # on_move(host, direction)
+        self.on_move_to_folder = on_move_to_folder  # on_move_to_folder(host, target)
+        self.get_folder_names = get_folder_names
+        self._checking        = False
 
         with self.canvas.before:
             Color(*T("card"))
             self._rect = RoundedRectangle(pos=self.pos, size=self.size,
-                                          radius=[dp(8)])
+                                          radius=[dp(7)])
         self.bind(pos=self._u, size=self._u)
 
-        # ── Кнопка с именем сайта (тап = проверить) ──
+        # ↑↓ кнопки
+        arrows = BoxLayout(orientation="vertical",
+                           size_hint=(None, 1), width=W_MOVE,
+                           spacing=dp(1))
+        for sym, d in [("^", -1), ("v", 1)]:
+            b = Button(text=sym, font_size=dp(10), bold=True,
+                       background_normal="", background_color=(0,0,0,0),
+                       color=T("subtext"), size_hint=(1, 1))
+            b.bind(on_press=lambda _, dir=d: self.on_move(self.host, dir))
+            arrows.add_widget(b)
+        self.add_widget(arrows)
+
+        # Название — кнопка для одиночной проверки
         self.btn_host = Button(
-            text=host,
-            font_size=dp(12),
-            bold=False,
-            halign="left",
-            valign="middle",
-            background_normal="",
-            background_color=(0, 0, 0, 0),
+            text=host, font_size=dp(12),
+            halign="left", valign="middle",
+            background_normal="", background_color=(0, 0, 0, 0),
             color=T("text"),
-            size_hint=(None, 1),
-            width=W_HOST,
-            text_size=(W_HOST - dp(8), None),
-            shorten=True,
-            shorten_from="right",
-        )
+            size_hint=(None, 1), width=W_HOST,
+            text_size=(W_HOST - dp(6), None),
+            shorten=True, shorten_from="right")
         self.btn_host.bind(on_press=self._on_tap)
+        self.add_widget(self.btn_host)
 
-        # ── Результаты ──
-        self.lbl_sent = Label(
-            text="--", font_size=dp(12), color=T("subtext"),
-            halign="center", valign="middle",
-            size_hint=(None, 1), width=W_SENT)
+        # Результаты
+        self.lbl_sent = Label(text="--", font_size=dp(11), color=T("subtext"),
+                              halign="center", valign="middle",
+                              size_hint=(None, 1), width=W_SENT)
+        self.lbl_recv = Label(text="--", font_size=dp(11), color=T("subtext"),
+                              halign="center", valign="middle",
+                              size_hint=(None, 1), width=W_RECV)
+        self.lbl_ms   = Label(text="--", font_size=dp(11), color=T("subtext"),
+                              halign="center", valign="middle",
+                              size_hint=(None, 1), width=W_MS)
 
-        self.lbl_recv = Label(
-            text="--", font_size=dp(12), color=T("subtext"),
-            halign="center", valign="middle",
-            size_hint=(None, 1), width=W_RECV)
+        for w in (self.lbl_sent, self.lbl_recv, self.lbl_ms):
+            self.add_widget(w)
 
-        self.lbl_ms = Label(
-            text="--", font_size=dp(12), color=T("subtext"),
-            halign="center", valign="middle",
-            size_hint=(None, 1), width=W_MS)
-
-        # ── Удалить ──
-        self.btn_del = Button(
-            text="X", font_size=dp(12), bold=True,
-            background_normal="",
-            background_color=T("del"),
+        # Кнопка переноса в другую папку
+        btn_mv = Button(
+            text=">", font_size=dp(12), bold=True,
+            background_normal="", background_color=T("move"),
             color=T("btn_text"),
             size_hint=(None, 1), width=W_DEL)
-        self.btn_del.bind(on_press=lambda _: self.on_delete(self.host))
+        btn_mv.bind(on_press=self._popup_move_folder)
+        self.add_widget(btn_mv)
 
-        for w in (self.btn_host, self.lbl_sent, self.lbl_recv,
-                  self.lbl_ms, self.btn_del):
-            self.add_widget(w)
+        # Кнопка удаления
+        btn_del = Button(
+            text="X", font_size=dp(12), bold=True,
+            background_normal="", background_color=T("del"),
+            color=T("btn_text"),
+            size_hint=(None, 1), width=W_DEL)
+        btn_del.bind(on_press=lambda _: self.on_delete(self.host))
+        self.add_widget(btn_del)
 
     def _u(self, *_):
         self._rect.pos  = self.pos
@@ -266,15 +277,46 @@ class SiteRow(BoxLayout):
         self.set_result(*result)
         self._checking = False
 
+    def _popup_move_folder(self, *_):
+        """Popup выбора папки для переноса сайта."""
+        folders = [f for f in self.get_folder_names()]
+        if len(folders) <= 1:
+            return
+
+        box   = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(14))
+        popup = make_popup("Перенести в папку", box, size=(dp(280), dp(220)))
+        box.add_widget(Label(
+            text=f"Куда перенести\n{self.host}?",
+            font_size=dp(13), color=T("text"), halign="center",
+            size_hint_y=None, height=dp(44)))
+
+        for fname in folders:
+            btn = Button(
+                text=fname, font_size=dp(13),
+                background_color=T("secondary"), color=T("text"),
+                size_hint_y=None, height=dp(40))
+            def do_move(_, target=fname):
+                popup.dismiss()
+                self.on_move_to_folder(self.host, target)
+            btn.bind(on_press=do_move)
+            box.add_widget(btn)
+
+        box.add_widget(Button(
+            text="Отмена", font_size=dp(13),
+            background_color=T("del"), color=T("btn_text"),
+            size_hint_y=None, height=dp(36),
+            on_press=lambda _: popup.dismiss()))
+        popup.open()
+
     def set_checking(self):
         for lbl in (self.lbl_sent, self.lbl_recv, self.lbl_ms):
             lbl.text  = "..."
             lbl.color = T("subtext")
 
     def set_result(self, sent, returned, ms):
-        self.lbl_sent.text  = "Да"   if sent     else "Нет"
+        self.lbl_sent.text  = "Да"  if sent     else "Нет"
         self.lbl_sent.color = T("green") if sent     else T("red")
-        self.lbl_recv.text  = "Да"   if returned  else "Нет"
+        self.lbl_recv.text  = "Да"  if returned  else "Нет"
         self.lbl_recv.color = T("green") if returned  else T("red")
         if ms is not None:
             self.lbl_ms.text  = f"{ms} мс"
@@ -297,8 +339,7 @@ class AddSitePopup(Popup):
             pos_hint={"center_x": 0.5, "top": 1.0},
             background_color=T("card"),
             title_color=T("text"),
-            separator_color=T("accent"),
-            **kw)
+            separator_color=T("accent"), **kw)
         self.on_add_cb = on_add
 
         content.add_widget(Label(
@@ -326,7 +367,8 @@ class AddSitePopup(Popup):
         content.add_widget(btns)
 
         Window.bind(on_keyboard_height=self._on_kb)
-        self.bind(on_dismiss=lambda _: Window.unbind(on_keyboard_height=self._on_kb))
+        self.bind(on_dismiss=lambda _: Window.unbind(
+            on_keyboard_height=self._on_kb))
         Clock.schedule_once(lambda dt: setattr(self.txt, "focus", True), 0.2)
 
     def _on_kb(self, win, height):
@@ -347,14 +389,20 @@ class AddSitePopup(Popup):
 # ─── Блок папки ───────────────────────────────────────────────────────────────
 
 class FolderBlock(BoxLayout):
-    def __init__(self, folder_name, sites, on_folder_delete,
-                 on_data_change, **kw):
+    def __init__(self, folder_name, sites,
+                 on_folder_delete, on_folder_move,
+                 on_data_change, get_folder_names,
+                 on_site_move_to_folder, **kw):
         super().__init__(orientation="vertical", size_hint_y=None,
                          spacing=dp(3), **kw)
-        self.folder_name      = folder_name
-        self.on_folder_delete = on_folder_delete
-        self.on_data_change   = on_data_change
+        self.folder_name          = folder_name
+        self.on_folder_delete     = on_folder_delete
+        self.on_folder_move       = on_folder_move
+        self.on_data_change       = on_data_change
+        self.get_folder_names     = get_folder_names
+        self.on_site_move_to_folder = on_site_move_to_folder
         self._rows      = {}
+        self._order     = []
         self._collapsed = False
 
         self.bind(minimum_height=self.setter("height"))
@@ -362,10 +410,12 @@ class FolderBlock(BoxLayout):
         self._build_sites(sites)
         self._update_height()
 
+    # ── Шапка папки ────────────────────────────────────────────────────────
+
     def _build_header(self):
         self._hdr = BoxLayout(
             orientation="horizontal", size_hint_y=None,
-            height=dp(46), spacing=dp(6), padding=[dp(10), dp(5)])
+            height=dp(46), spacing=dp(4), padding=[dp(8), dp(5)])
         with self._hdr.canvas.before:
             Color(*T("folder"))
             self._hdr_rect = RoundedRectangle(
@@ -374,40 +424,60 @@ class FolderBlock(BoxLayout):
             pos=lambda *_: setattr(self._hdr_rect, "pos", self._hdr.pos),
             size=lambda *_: setattr(self._hdr_rect, "size", self._hdr.size))
 
+        # ↑↓ папки
+        fold_arrows = BoxLayout(orientation="vertical",
+                                size_hint=(None, 1), width=dp(20), spacing=dp(1))
+        for sym, d in [("^", -1), ("v", 1)]:
+            b = Button(text=sym, font_size=dp(10), bold=True,
+                       background_normal="", background_color=(0,0,0,0),
+                       color=T("subtext"), size_hint=(1, 1))
+            b.bind(on_press=lambda _, dir=d: self.on_folder_move(self.folder_name, dir))
+            fold_arrows.add_widget(b)
+        self._hdr.add_widget(fold_arrows)
+
+        # Кнопка свернуть
         self.btn_toggle = Button(
             text="v", font_size=dp(13), bold=True,
-            background_normal="", background_color=(0, 0, 0, 0),
-            color=T("accent"), size_hint=(None, 1), width=dp(24))
+            background_normal="", background_color=(0,0,0,0),
+            color=T("accent"), size_hint=(None, 1), width=dp(22))
         self.btn_toggle.bind(on_press=self._toggle)
+        self._hdr.add_widget(self.btn_toggle)
 
+        # Название
         self.lbl_name = Label(
             text=self.folder_name, font_size=dp(15), bold=True,
             color=T("text"), halign="left", valign="middle", size_hint=(1, 1))
         self.lbl_name.bind(
             size=lambda i, v: setattr(i, "text_size", (v[0], None)))
+        self._hdr.add_widget(self.lbl_name)
 
+        # Счётчик
         self.lbl_count = Label(
             text=self._count_text(), font_size=dp(11),
             color=T("subtext"), halign="right", valign="middle",
-            size_hint=(None, 1), width=dp(68))
+            size_hint=(None, 1), width=dp(62))
+        self._hdr.add_widget(self.lbl_count)
 
+        # + добавить сайт
         btn_add = Button(
             text="+", font_size=dp(18), bold=True,
             background_normal="",
             background_color=T("accent"), color=T("btn_text"),
-            size_hint=(None, 1), width=dp(34))
+            size_hint=(None, 1), width=dp(32))
         btn_add.bind(on_press=self._open_add_popup)
+        self._hdr.add_widget(btn_add)
 
+        # Удалить папку
         btn_del = Button(
-            text="X", font_size=dp(13), bold=True,
-            background_normal="", background_color=(0, 0, 0, 0),
-            color=T("red"), size_hint=(None, 1), width=dp(26))
+            text="X", font_size=dp(12), bold=True,
+            background_normal="", background_color=(0,0,0,0),
+            color=T("red"), size_hint=(None, 1), width=dp(24))
         btn_del.bind(on_press=lambda _: self.on_folder_delete(self.folder_name))
+        self._hdr.add_widget(btn_del)
 
-        for w in (self.btn_toggle, self.lbl_name, self.lbl_count,
-                  btn_add, btn_del):
-            self._hdr.add_widget(w)
         self.add_widget(self._hdr)
+
+    # ── Список сайтов ──────────────────────────────────────────────────────
 
     def _build_sites(self, sites):
         self._sites_box = BoxLayout(
@@ -418,7 +488,7 @@ class FolderBlock(BoxLayout):
         self.add_widget(self._sites_box)
 
     def _count_text(self):
-        n = len(self._rows) if hasattr(self, "_rows") else 0
+        n = len(self._order) if hasattr(self, "_order") else 0
         end = "ов" if (n % 10 != 1 or n % 100 == 11) else ""
         return f"{n} сайт{end}"
 
@@ -433,8 +503,15 @@ class FolderBlock(BoxLayout):
     def _add_row(self, host):
         if host in self._rows:
             return
-        row = SiteRow(host, on_delete=self._on_delete_site)
+        row = SiteRow(
+            host=host,
+            on_delete=self._on_delete_site,
+            on_move=self._on_move_site,
+            on_move_to_folder=self.on_site_move_to_folder,
+            get_folder_names=self.get_folder_names,
+        )
         self._rows[host] = row
+        self._order.append(host)
         self._sites_box.add_widget(row)
         self.lbl_count.text = self._count_text()
         self._update_height()
@@ -442,9 +519,43 @@ class FolderBlock(BoxLayout):
     def _on_delete_site(self, host):
         if host in self._rows:
             self._sites_box.remove_widget(self._rows.pop(host))
+            self._order.remove(host)
             self.lbl_count.text = self._count_text()
             self._update_height()
             self.on_data_change()
+
+    def _on_move_site(self, host, direction):
+        """Перемещает сайт на одну позицию вверх (-1) или вниз (+1)."""
+        if host not in self._order:
+            return
+        idx = self._order.index(host)
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(self._order):
+            return
+        # Меняем в списке
+        self._order[idx], self._order[new_idx] = self._order[new_idx], self._order[idx]
+        # Перестраиваем виджеты
+        self._rebuild_sites_box()
+        self.on_data_change()
+
+    def _rebuild_sites_box(self):
+        self._sites_box.clear_widgets()
+        for host in self._order:
+            if host in self._rows:
+                self._sites_box.add_widget(self._rows[host])
+
+    def remove_site(self, host):
+        """Удаляет сайт без вызова on_data_change (вызывается при переносе)."""
+        if host in self._rows:
+            self._sites_box.remove_widget(self._rows.pop(host))
+            self._order.remove(host)
+            self.lbl_count.text = self._count_text()
+            self._update_height()
+
+    def add_site_external(self, host):
+        """Добавляет сайт, пришедший из другой папки."""
+        self._add_row(host)
+        self.on_data_change()
 
     def _toggle(self, *_):
         self._collapsed = not self._collapsed
@@ -465,12 +576,12 @@ class FolderBlock(BoxLayout):
         self.height = h
 
     def get_sites(self):
-        return list(self._rows.keys())
+        return list(self._order)
 
     def check_all(self):
         for row in self._rows.values():
             row.set_checking()
-        return list(self._rows.items())
+        return [(h, self._rows[h]) for h in self._order]
 
     def apply_results(self, results):
         for host, (sent, returned, ms) in results.items():
@@ -478,25 +589,22 @@ class FolderBlock(BoxLayout):
                 self._rows[host].set_result(sent, returned, ms)
 
 
-# ─── Шапка таблицы (синхронизирована с SiteRow) ──────────────────────────────
+# ─── Шапка таблицы ────────────────────────────────────────────────────────────
 
 def build_table_header():
-    """Заголовки точно совпадают с колонками SiteRow."""
-    row = BoxLayout(
-        orientation="horizontal",
-        size_hint_y=None, height=dp(22),
-        padding=[dp(6), 0], spacing=dp(4))
-
+    row = BoxLayout(orientation="horizontal", size_hint_y=None,
+                    height=dp(20), padding=[dp(4), 0], spacing=dp(3))
     def lbl(text, width):
-        return Label(text=text, font_size=dp(10), color=T("subtext"),
+        return Label(text=text, font_size=dp(9), color=T("subtext"),
                      halign="center", valign="middle",
                      size_hint=(None, 1), width=width)
-
+    row.add_widget(lbl("",          W_MOVE))
     row.add_widget(lbl("Сайт",      W_HOST))
-    row.add_widget(lbl("Отправлен", W_SENT))
-    row.add_widget(lbl("Вернулся",  W_RECV))
+    row.add_widget(lbl("Отпр.",     W_SENT))
+    row.add_widget(lbl("Верн.",     W_RECV))
     row.add_widget(lbl("Задержка",  W_MS))
-    row.add_widget(lbl("",          W_DEL))
+    row.add_widget(lbl(">",         W_DEL))
+    row.add_widget(lbl("X",         W_DEL))
     return row
 
 
@@ -506,9 +614,10 @@ class MainScreen(BoxLayout):
     def __init__(self, **kw):
         super().__init__(orientation="vertical",
                          padding=dp(10), spacing=dp(6), **kw)
-        self._data = load_data()
+        self._data          = load_data()
         set_theme(self._data.get("theme", "dark"))
         self._folder_blocks = {}
+        self._folder_order  = []
 
         with self.canvas.before:
             Color(*T("bg"))
@@ -523,61 +632,86 @@ class MainScreen(BoxLayout):
         self._build_footer()
         self._populate_folders()
 
+    # ── Шапка ──────────────────────────────────────────────────────────────
+
     def _build_header(self):
         hdr = BoxLayout(orientation="horizontal", size_hint_y=None,
-                        height=dp(54), spacing=dp(8))
+                        height=dp(52), spacing=dp(6))
 
-        left = BoxLayout(orientation="vertical", size_hint=(1, 1))
+        # Центр — название + описание
+        center = BoxLayout(orientation="vertical", size_hint=(1, 1))
         t1 = Label(text="SiteChecker", font_size=dp(20), bold=True,
-                   color=T("accent"), halign="left", valign="bottom",
-                   size_hint_y=None, height=dp(30))
+                   color=T("accent"), halign="center", valign="bottom",
+                   size_hint_y=None, height=dp(28))
         t2 = Label(text="Проверка доступности сайтов",
-                   font_size=dp(11), color=T("subtext"),
-                   halign="left", valign="top",
-                   size_hint_y=None, height=dp(18))
+                   font_size=dp(10), color=T("subtext"),
+                   halign="center", valign="top",
+                   size_hint_y=None, height=dp(16))
         for l in (t1, t2):
             l.bind(size=lambda i, v: setattr(i, "text_size", (v[0], None)))
-            left.add_widget(l)
+            center.add_widget(l)
 
+        # Правый блок — переключатель темы + кнопка обновления
         right = BoxLayout(orientation="horizontal",
-                          size_hint=(None, 1), width=dp(168), spacing=dp(8))
+                          size_hint=(None, 1), width=dp(120), spacing=dp(6))
 
-        # Переключатель темы
-        theme_box = BoxLayout(orientation="vertical",
-                              size_hint=(None, 1), width=dp(70))
+        # Переключатель темы — компактный
+        sw_box = BoxLayout(orientation="vertical",
+                           size_hint=(None, 1), width=dp(52))
         self._lbl_theme = Label(
-            text="Светлая" if _current_theme == "light" else "Тёмная",
-            font_size=dp(9), color=T("subtext"),
-            size_hint_y=None, height=dp(16))
+            text="Light" if _current_theme == "light" else "Dark",
+            font_size=dp(8), color=T("subtext"),
+            size_hint_y=None, height=dp(14), halign="center")
         sw = Switch(active=(_current_theme == "light"),
-                    size_hint=(1, None), height=dp(32))
+                    size_hint=(1, None), height=dp(28))
         sw.bind(active=self._on_theme_switch)
-        theme_box.add_widget(self._lbl_theme)
-        theme_box.add_widget(sw)
+        sw_box.add_widget(self._lbl_theme)
+        sw_box.add_widget(sw)
 
-        btn_new = Button(
-            text="+ Папка", font_size=dp(12), bold=True,
+        # Кнопка обновления приложения
+        btn_upd = Button(
+            text="Обновить", font_size=dp(10), bold=True,
             background_normal="",
-            background_color=T("accent"), color=T("btn_text"),
-            size_hint=(None, 1), width=dp(86))
-        btn_new.bind(on_press=self._popup_new_folder)
+            background_color=T("secondary"), color=T("btn_text"),
+            size_hint=(None, 1), width=dp(62))
+        btn_upd.bind(on_press=self._go_to_loader)
 
-        right.add_widget(theme_box)
-        right.add_widget(btn_new)
-        hdr.add_widget(left)
+        right.add_widget(sw_box)
+        right.add_widget(btn_upd)
+
+        hdr.add_widget(center)
         hdr.add_widget(right)
         self.add_widget(hdr)
 
     def _on_theme_switch(self, sw, value):
         new_theme = "light" if value else "dark"
         set_theme(new_theme)
-        self._data["theme"] = new_theme
+        self._lbl_theme.text = "Light" if value else "Dark"
+        self._data["theme"]  = new_theme
         save_data(self._data)
         Window.clearcolor = T("bg")
         app  = App.get_running_app()
         root = app.root
         root.clear_widgets()
         root.add_widget(MainScreen())
+
+    def _go_to_loader(self, *_):
+        """Возвращает на экран загрузчика для проверки обновлений."""
+        try:
+            import main as loader_module
+            screen = loader_module.LoaderScreen()
+            app    = App.get_running_app()
+            root   = app.root
+            root.clear_widgets()
+            root.add_widget(screen)
+        except Exception as e:
+            # Если не удалось — просто перезапускаем MainScreen
+            app  = App.get_running_app()
+            root = app.root
+            root.clear_widgets()
+            root.add_widget(MainScreen())
+
+    # ── Список ─────────────────────────────────────────────────────────────
 
     def _build_scroll(self):
         self.scroll  = ScrollView(size_hint=(1, 1))
@@ -587,14 +721,33 @@ class MainScreen(BoxLayout):
         self.scroll.add_widget(self.content)
         self.add_widget(self.scroll)
 
+    # ── Нижняя панель ──────────────────────────────────────────────────────
+
     def _build_footer(self):
+        footer = BoxLayout(orientation="vertical",
+                           size_hint_y=None, height=dp(88), spacing=dp(6))
+
+        # Кнопка добавления папки — во всю ширину, но не высокая
+        btn_new_folder = Button(
+            text="+ Добавить папку", font_size=dp(12),
+            background_normal="",
+            background_color=T("secondary"), color=T("subtext"),
+            size_hint_y=None, height=dp(32))
+        btn_new_folder.bind(on_press=self._popup_new_folder)
+
+        # Кнопка проверки всех
         self.btn_check = Button(
             text=">> Проверить все", font_size=dp(15), bold=True,
             background_normal="",
             background_color=T("btn"), color=T("btn_text"),
-            size_hint_y=None, height=dp(52))
+            size_hint_y=None, height=dp(50))
         self.btn_check.bind(on_press=self._check_all)
-        self.add_widget(self.btn_check)
+
+        footer.add_widget(btn_new_folder)
+        footer.add_widget(self.btn_check)
+        self.add_widget(footer)
+
+    # ── Папки ──────────────────────────────────────────────────────────────
 
     def _populate_folders(self):
         for folder in self._data["folders"]:
@@ -604,9 +757,54 @@ class MainScreen(BoxLayout):
         block = FolderBlock(
             folder_name=name, sites=sites,
             on_folder_delete=self._on_folder_delete,
-            on_data_change=self._save)
+            on_folder_move=self._on_folder_move,
+            on_data_change=self._save,
+            get_folder_names=self._get_folder_names,
+            on_site_move_to_folder=self._on_site_move_to_folder,
+        )
         self._folder_blocks[name] = block
+        self._folder_order.append(name)
         self.content.add_widget(block)
+
+    def _get_folder_names(self):
+        return list(self._folder_order)
+
+    def _on_folder_move(self, folder_name, direction):
+        """Перемещает папку вверх (-1) или вниз (+1)."""
+        if folder_name not in self._folder_order:
+            return
+        idx     = self._folder_order.index(folder_name)
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(self._folder_order):
+            return
+        self._folder_order[idx], self._folder_order[new_idx] = \
+            self._folder_order[new_idx], self._folder_order[idx]
+        self._rebuild_content()
+        self._save()
+
+    def _rebuild_content(self):
+        self.content.clear_widgets()
+        for name in self._folder_order:
+            if name in self._folder_blocks:
+                self.content.add_widget(self._folder_blocks[name])
+
+    def _on_site_move_to_folder(self, host, target_folder):
+        """Переносит сайт из его текущей папки в target_folder."""
+        if target_folder not in self._folder_blocks:
+            return
+        # Найдём исходную папку
+        source = None
+        for name, block in self._folder_blocks.items():
+            if host in block.get_sites():
+                source = name
+                break
+        if source is None or source == target_folder:
+            return
+        # Удаляем из исходной
+        self._folder_blocks[source].remove_site(host)
+        # Добавляем в целевую — нужно пересоздать SiteRow с новыми коллбэками
+        self._folder_blocks[target_folder].add_site_external(host)
+        self._save()
 
     def _on_folder_delete(self, folder_name):
         box   = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(14))
@@ -624,6 +822,7 @@ class MainScreen(BoxLayout):
             popup.dismiss()
             if folder_name in self._folder_blocks:
                 self.content.remove_widget(self._folder_blocks.pop(folder_name))
+                self._folder_order.remove(folder_name)
                 self._save()
 
         btn_yes.bind(on_press=do_delete)
@@ -666,10 +865,13 @@ class MainScreen(BoxLayout):
         popup.open()
         Clock.schedule_once(lambda dt: setattr(txt, "focus", True), 0.2)
 
+    # ── Проверка всех ──────────────────────────────────────────────────────
+
     def _check_all(self, *_):
         all_items = []
-        for block in self._folder_blocks.values():
-            all_items.extend(block.check_all())
+        for name in self._folder_order:
+            if name in self._folder_blocks:
+                all_items.extend(self._folder_blocks[name].check_all())
         if not all_items:
             return
         self.btn_check.text     = "Проверяем..."
@@ -687,9 +889,12 @@ class MainScreen(BoxLayout):
         self.btn_check.text     = ">> Проверить все"
         self.btn_check.disabled = False
 
+    # ── Сохранение ─────────────────────────────────────────────────────────
+
     def _save(self):
         self._data["folders"] = [
-            {"name": name, "sites": block.get_sites()}
-            for name, block in self._folder_blocks.items()
+            {"name": name, "sites": self._folder_blocks[name].get_sites()}
+            for name in self._folder_order
+            if name in self._folder_blocks
         ]
         save_data(self._data)
