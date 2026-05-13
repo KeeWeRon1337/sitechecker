@@ -208,7 +208,7 @@ class SiteRow(BoxLayout):
             halign="left",
             valign="middle",
             background_normal="",
-            background_color=T("host_btn"),
+            background_color=(0, 0, 0, 0),
             color=T("text"),
             size_hint=(None, 1),
             width=W_HOST,
