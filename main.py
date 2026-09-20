@@ -12,6 +12,7 @@ import urllib.request
 import urllib.error
 import importlib.util
 import sys
+import certifi
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -21,6 +22,9 @@ from kivy.graphics import Color, Rectangle
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
+
+os.environ["SSL_CERT_FILE"] = certifi.where()
+os.environ["SSL_CERT_DIR"] = os.path.dirname(certifi.where())
 
 # ─── Конфиг ───────────────────────────────────────────────────────────────────
 GITHUB_USER   = "KeeWeRon1337"
