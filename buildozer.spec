@@ -19,3 +19,4 @@ android.accept_sdk_license = True
 [buildozer]
 log_level = 2
 warn_on_root = 0
+p4a.branch = develop
