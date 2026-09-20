@@ -21,10 +21,7 @@ from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
 from kivy.uix.button import Button
-from kivy.uix.popup import Popup
-from kivy.uix.switch import Switch
-from kivy.uix.spinner import Spinner
-from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.graphics import Color, Rectangle
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
