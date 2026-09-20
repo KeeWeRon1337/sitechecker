@@ -13,10 +13,10 @@ android.api = 33
 android.minapi = 21
 android.ndk = 25b
 android.ndk_api = 21
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
+p4a.branch = develop
 android.accept_sdk_license = True
 
 [buildozer]
 log_level = 2
 warn_on_root = 0
-p4a.branch = develop
