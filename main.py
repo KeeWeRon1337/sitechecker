@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-main.py v1.4 — Загрузчик SiteChecker.
-Исправлено: надёжный запуск app.py через смену root виджета.
+main.py v2.0 — Загрузчик SiteChecker.
+Добавлена кнопка "Проверка скорости" — скачивает speedtest_module.py
+и открывает экран измерения скорости (спидометр).
 """
 
 import os
@@ -9,7 +10,6 @@ import ssl
 import threading
 import urllib.request
 import urllib.error
-import importlib
 import importlib.util
 import sys
 
@@ -37,6 +37,7 @@ def make_urls(filename):
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 LOCAL_APP = os.path.join(APP_DIR, "app_downloaded.py")
 LOCAL_VER = os.path.join(APP_DIR, "version_downloaded.txt")
+LOCAL_SPEEDTEST = os.path.join(APP_DIR, "speedtest_downloaded.py")
 
 BUILTIN_VERSION = "1.0"
 TIMEOUT     = 20
@@ -50,6 +51,7 @@ CLR_GREEN   = (0.22, 0.78, 0.51, 1)
 CLR_RED     = (0.93, 0.33, 0.36, 1)
 CLR_YELLOW  = (0.98, 0.76, 0.18, 1)
 CLR_BTN     = (0.22, 0.68, 0.87, 1)
+CLR_SPEED   = (0.55, 0.35, 0.85, 1)
 
 
 # ─── Android разрешения ───────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ def fetch_with_fallback(filename, on_progress=None):
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 req = urllib.request.Request(
-                    url, headers={"User-Agent": "SiteChecker/1.4",
+                    url, headers={"User-Agent": "SiteChecker/1.5",
                                   "Connection": "close"})
                 if url.startswith("https://"):
                     handler = urllib.request.HTTPSHandler(context=ssl_ctx)
@@ -135,6 +137,19 @@ def download_app(on_progress=None):
         return False, str(e)
 
 
+def download_speedtest_module(on_progress=None):
+    """Скачивает speedtest_module.py — всегда свежую версию."""
+    data, err = fetch_with_fallback("speedtest_module.py", on_progress)
+    if data is None:
+        return False, err
+    try:
+        with open(LOCAL_SPEEDTEST, "wb") as f:
+            f.write(data)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 # ─── Версия ───────────────────────────────────────────────────────────────────
 
 def get_local_version():
@@ -146,7 +161,6 @@ def get_local_version():
         pass
     return None
 
-
 def save_version(v):
     try:
         with open(LOCAL_VER, "w", encoding="utf-8") as f:
@@ -155,23 +169,28 @@ def save_version(v):
         pass
 
 
-# ─── Запуск app.py ────────────────────────────────────────────────────────────
+# ─── Загрузка модулей ─────────────────────────────────────────────────────────
 
-def load_app_module():
-    """
-    Загружает app_downloaded.py как модуль Python.
-    Возвращает (module | None, error_str).
-    """
-    if not os.path.exists(LOCAL_APP):
-        return None, "Файл app.py не найден"
+def load_module_from_file(path, module_key):
+    """Универсальная загрузка любого скачанного .py файла как модуля."""
+    if not os.path.exists(path):
+        return None, "Файл не найден"
     try:
-        spec = importlib.util.spec_from_file_location("sitechecker_app", LOCAL_APP)
+        spec = importlib.util.spec_from_file_location(module_key, path)
         mod  = importlib.util.module_from_spec(spec)
-        sys.modules["sitechecker_app"] = mod
+        sys.modules[module_key] = mod
         spec.loader.exec_module(mod)
         return mod, ""
     except Exception as e:
         return None, str(e)
+
+
+def load_app_module():
+    return load_module_from_file(LOCAL_APP, "sitechecker_app")
+
+
+def load_speedtest_module():
+    return load_module_from_file(LOCAL_SPEEDTEST, "sitechecker_speedtest")
 
 
 # ─── Экран загрузчика ─────────────────────────────────────────────────────────
@@ -199,7 +218,7 @@ class LoaderScreen(BoxLayout):
         self.lbl_status = Label(
             text="Инициализация...", font_size=dp(14), color=CLR_TEXT,
             halign="center", valign="middle",
-            size_hint_y=None, height=dp(80))
+            size_hint_y=None, height=dp(70))
         self.lbl_status.bind(
             size=lambda i, v: setattr(i, "text_size", (v[0], None)))
         self.add_widget(self.lbl_status)
@@ -216,14 +235,25 @@ class LoaderScreen(BoxLayout):
         self.btn_launch = Button(
             text="Запустить приложение",
             font_size=dp(15), bold=True,
+            background_normal="",
             background_color=CLR_BTN, color=(0.04, 0.04, 0.06, 1),
             size_hint_y=None, height=dp(54), disabled=True)
         self.btn_launch.bind(on_press=self._on_launch)
         self.add_widget(self.btn_launch)
 
+        self.btn_speed = Button(
+            text="Проверка скорости",
+            font_size=dp(14), bold=True,
+            background_normal="",
+            background_color=CLR_SPEED, color=(0.97, 0.97, 0.99, 1),
+            size_hint_y=None, height=dp(48))
+        self.btn_speed.bind(on_press=self._on_speedtest)
+        self.add_widget(self.btn_speed)
+
         self.btn_update = Button(
             text="Проверить обновления",
             font_size=dp(13),
+            background_normal="",
             background_color=(0.18, 0.22, 0.28, 1), color=CLR_TEXT,
             size_hint_y=None, height=dp(44), disabled=True)
         self.btn_update.bind(on_press=self._on_update)
@@ -232,12 +262,16 @@ class LoaderScreen(BoxLayout):
         request_android_permissions()
         Clock.schedule_once(lambda dt: self._start_check(), 2.0)
 
+    # ── Общие утилиты статуса ────────────────────────────────────────────────
+
     def _set_status(self, text, color=None):
         self.lbl_status.text  = text
         self.lbl_status.color = color or CLR_TEXT
 
     def _set_detail(self, text):
         self.lbl_detail.text = text
+
+    # ── Проверка версии app.py ────────────────────────────────────────────────
 
     def _start_check(self):
         self._set_status("Подключаемся к GitHub...", CLR_TEXT)
@@ -271,7 +305,7 @@ class LoaderScreen(BoxLayout):
                 target=self._bg_update, args=(remote_ver,), daemon=True
             ).start()
         else:
-            self._set_status(f"Версия актуальна: {local_ver} ✔", CLR_GREEN)
+            self._set_status(f"Версия актуальна: {local_ver}", CLR_GREEN)
             self.btn_launch.disabled = False
             self.btn_update.disabled = False
 
@@ -287,7 +321,7 @@ class LoaderScreen(BoxLayout):
         if success:
             save_version(remote_ver)
             self.lbl_version.text = f"Версия: {remote_ver}"
-            self._set_status(f"Обновлено до {remote_ver} ✔", CLR_GREEN)
+            self._set_status(f"Обновлено до {remote_ver}", CLR_GREEN)
         else:
             self._set_status(f"Ошибка загрузки:\n{err}", CLR_RED)
         self.btn_launch.disabled = not os.path.exists(LOCAL_APP)
@@ -305,7 +339,6 @@ class LoaderScreen(BoxLayout):
         self.btn_launch.disabled = True
         self.btn_update.disabled = True
         self._set_status("Загружаем модуль...", CLR_ACCENT)
-        # Небольшая пауза чтобы UI успел обновиться
         Clock.schedule_once(lambda dt: self._do_launch(), 0.2)
 
     def _do_launch(self):
@@ -315,12 +348,10 @@ class LoaderScreen(BoxLayout):
             self.btn_launch.disabled = False
             self.btn_update.disabled = False
             return
-
-        # Получаем главный экран из модуля и подменяем root
         try:
-            app      = App.get_running_app()
-            screen   = mod.MainScreen()
-            root     = app.root
+            app    = App.get_running_app()
+            screen = mod.MainScreen()
+            root   = app.root
             root.clear_widgets()
             root.add_widget(screen)
         except Exception as e:
@@ -328,13 +359,66 @@ class LoaderScreen(BoxLayout):
             self.btn_launch.disabled = False
             self.btn_update.disabled = False
 
+    # ── Проверка скорости ──────────────────────────────────────────────────
+
+    def _on_speedtest(self, *_):
+        self.btn_speed.disabled  = True
+        self.btn_launch.disabled = True
+        self.btn_update.disabled = True
+        self._set_status("Загружаем модуль скорости...", CLR_SPEED)
+        threading.Thread(target=self._bg_load_speedtest, daemon=True).start()
+
+    def _bg_load_speedtest(self):
+        def prog(msg):
+            Clock.schedule_once(lambda dt: self._set_detail(msg))
+        success, err = download_speedtest_module(on_progress=prog)
+        Clock.schedule_once(lambda dt: self._after_speedtest_download(success, err))
+
+    def _after_speedtest_download(self, success, err):
+        self._set_detail("")
+        if not success:
+            # Пробуем запустить старую скачанную копию если она уже есть
+            if not os.path.exists(LOCAL_SPEEDTEST):
+                self._set_status(f"Не удалось загрузить модуль:\n{err}", CLR_RED)
+                self._restore_buttons()
+                return
+            self._set_status("Нет связи, используем сохранённую версию.", CLR_YELLOW)
+
+        mod, load_err = load_speedtest_module()
+        if mod is None:
+            self._set_status(f"Ошибка запуска модуля:\n{load_err}", CLR_RED)
+            self._restore_buttons()
+            return
+
+        try:
+            app    = App.get_running_app()
+            screen = mod.SpeedTestScreen(on_back=self._return_to_loader)
+            root   = app.root
+            root.clear_widgets()
+            root.add_widget(screen)
+        except Exception as e:
+            self._set_status(f"Ошибка экрана скорости:\n{e}", CLR_RED)
+            self._restore_buttons()
+
+    def _return_to_loader(self):
+        """Callback для возврата из экрана скорости обратно сюда."""
+        app  = App.get_running_app()
+        root = app.root
+        root.clear_widgets()
+        new_screen = LoaderScreen()
+        root.add_widget(new_screen)
+
+    def _restore_buttons(self):
+        self.btn_speed.disabled  = False
+        self.btn_launch.disabled = not os.path.exists(LOCAL_APP)
+        self.btn_update.disabled = False
+
 
 # ─── Приложение ───────────────────────────────────────────────────────────────
 
 class LauncherApp(App):
     def build(self):
         Window.clearcolor = CLR_BG
-        # Корневой контейнер — в него подменяем экран при запуске
         root = BoxLayout()
         root.add_widget(LoaderScreen())
         return root

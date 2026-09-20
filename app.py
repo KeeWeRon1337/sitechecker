@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-app.py v1.7 — SiteChecker
+app.py v2.0 — SiteChecker
 Нововведения: перемещение папок и сайтов вверх/вниз, перенос сайта
 между папками, кнопка обновления прямо в приложении, новая шапка
 (центр + тема справа), кнопка "+ Папка" внизу.
@@ -13,8 +13,10 @@ import threading
 import time
 import json
 import os
+import math
 
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.widget import Widget
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
@@ -116,6 +118,13 @@ def save_data(data):
 PING_TIMEOUT   = 3
 SOCKET_TIMEOUT = 3
 
+# ─── Конфиг спидтеста — свой VDS сервер (speedserver.py) ────────────────────
+# ИЗМЕНИТЕ на реальный IP/домен и порт вашего сервера
+SPEED_HOST      = "139.100.227.108"
+SPEED_PORT      = 5201
+SPEED_TEST_SIZE = 100 * 1024 * 1024   # 100 МБ на скачивание/отправку
+SPEED_TIMEOUT   = 10
+
 def measure_ping_ms(host):
     s = platform.system().lower()
     cmd = (["ping", "-n", "1", "-w", str(PING_TIMEOUT * 1000), host]
@@ -155,6 +164,95 @@ def check_site(host):
     if ms is not None:
         return True, True, ms
     return True, False, None
+
+
+# ─── Измерение скорости к своему VDS (протокол speedserver.py) ──────────────
+
+def speedtest_ping(host, port, count=4, timeout=SPEED_TIMEOUT):
+    """Возвращает среднюю задержку в мс (round-trip к серверу)."""
+    times = []
+    s = socket.create_connection((host, port), timeout=timeout)
+    try:
+        for _ in range(count):
+            t0 = time.monotonic()
+            s.sendall(b"PING\n")
+            resp = s.recv(16)
+            if resp.strip() == b"PONG":
+                times.append((time.monotonic() - t0) * 1000)
+    finally:
+        s.close()
+    if not times:
+        raise RuntimeError("Сервер не ответил на PING")
+    return sum(times) / len(times)
+
+
+def speedtest_download(host, port, size_bytes, timeout=SPEED_TIMEOUT,
+                       on_progress=None):
+    """
+    Скачивает size_bytes байт с сервера, периодически вызывает
+    on_progress(instant_bytes_per_sec). Возвращает средние байт/сек.
+    """
+    s = socket.create_connection((host, port), timeout=timeout)
+    try:
+        s.sendall(f"DOWN {size_bytes}\n".encode())
+        received  = 0
+        t_start   = time.monotonic()
+        last_t    = t_start
+        last_recv = 0
+        while received < size_bytes:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            received += len(chunk)
+            now = time.monotonic()
+            if on_progress and (now - last_t) > 0.15:
+                inst = (received - last_recv) / (now - last_t)
+                on_progress(inst)
+                last_t    = now
+                last_recv = received
+        total_time = max(time.monotonic() - t_start, 0.001)
+        return received / total_time
+    finally:
+        s.close()
+
+
+def speedtest_upload(host, port, size_bytes, timeout=SPEED_TIMEOUT,
+                     on_progress=None):
+    """
+    Отправляет size_bytes байт на сервер, периодически вызывает
+    on_progress(instant_bytes_per_sec). Возвращает средние байт/сек.
+    """
+    s = socket.create_connection((host, port), timeout=timeout)
+    try:
+        s.sendall(b"UP\n")
+        chunk_buf = b"\x00" * 65536
+        sent      = 0
+        t_start   = time.monotonic()
+        last_t    = t_start
+        last_sent = 0
+        while sent < size_bytes:
+            to_send = min(len(chunk_buf), size_bytes - sent)
+            s.sendall(chunk_buf[:to_send])
+            sent += to_send
+            now = time.monotonic()
+            if on_progress and (now - last_t) > 0.15:
+                inst = (sent - last_sent) / (now - last_t)
+                on_progress(inst)
+                last_t    = now
+                last_sent = sent
+        try:
+            s.shutdown(socket.SHUT_WR)
+            s.recv(64)
+        except Exception:
+            pass
+        total_time = max(time.monotonic() - t_start, 0.001)
+        return sent / total_time
+    finally:
+        s.close()
+
+
+def bps_to_mbps(bytes_per_sec):
+    return (bytes_per_sec * 8) / 1_000_000
 
 
 # ─── Popup ────────────────────────────────────────────────────────────────────
@@ -897,3 +995,262 @@ class MainScreen(BoxLayout):
             if name in self._folder_blocks
         ]
         save_data(self._data)
+
+
+# ─── Виджет-спидометр ─────────────────────────────────────────────────────────
+
+class SpeedGauge(Widget):
+    """
+    Дуговой спидометр (270°, разрыв внизу), похожий на Speedtest.net.
+    0 скорости — внизу слева, максимум — внизу справа, стрелка идёт
+    по часовой стрелке через верх.
+    """
+    START_ANGLE = 225   # позиция "0" (низ-лево), градусы (мат. система)
+    END_ANGLE   = -45   # позиция "макс" (низ-право)
+    TIERS = [5, 10, 25, 50, 100, 200, 500, 1000, 2000]
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.max_value = 50.0
+        self.value     = 0.0
+        self.bind(pos=self._redraw, size=self._redraw)
+
+    def set_value(self, mbps):
+        mbps = max(0.0, mbps)
+        chosen = self.TIERS[-1]
+        for t in self.TIERS:
+            if mbps <= t * 0.90:
+                chosen = t
+                break
+        self.max_value = chosen
+        self.value     = mbps
+        self._redraw()
+
+    def reset(self):
+        self.value = 0.0
+        self.max_value = 50.0
+        self._redraw()
+
+    def _redraw(self, *_):
+        self.canvas.clear()
+        if self.width <= 0 or self.height <= 0:
+            return
+        cx = self.center_x
+        cy = self.center_y
+        radius = min(self.width, self.height) / 2 - dp(12)
+        if radius <= 0:
+            return
+
+        frac = 0.0
+        if self.max_value > 0:
+            frac = min(1.0, self.value / self.max_value)
+        value_angle = self.START_ANGLE - frac * (self.START_ANGLE - self.END_ANGLE)
+
+        with self.canvas:
+            Color(*T("secondary"))
+            Line(circle=(cx, cy, radius, self.END_ANGLE, self.START_ANGLE),
+                 width=dp(9), cap="round")
+
+            if frac > 0.001:
+                Color(*T("accent"))
+                Line(circle=(cx, cy, radius, value_angle, self.START_ANGLE),
+                     width=dp(9), cap="round")
+
+            needle_len = radius - dp(16)
+            ang_rad = math.radians(value_angle)
+            nx = cx + needle_len * math.cos(ang_rad)
+            ny = cy + needle_len * math.sin(ang_rad)
+            Color(*T("text"))
+            Line(points=[cx, cy, nx, ny], width=dp(3), cap="round")
+
+            Color(*T("accent"))
+            Ellipse(pos=(cx - dp(7), cy - dp(7)), size=(dp(14), dp(14)))
+
+
+# ─── Экран проверки скорости ──────────────────────────────────────────────────
+
+class SpeedResultBox(BoxLayout):
+    def __init__(self, title, **kw):
+        super().__init__(orientation="vertical", **kw)
+        self.lbl_title = Label(
+            text=title, font_size=dp(10), color=T("subtext"),
+            size_hint_y=None, height=dp(16))
+        self.lbl_value = Label(
+            text="--", font_size=dp(15), bold=True, color=T("text"))
+        self.add_widget(self.lbl_title)
+        self.add_widget(self.lbl_value)
+
+    def set(self, text, color=None):
+        self.lbl_value.text = text
+        if color:
+            self.lbl_value.color = color
+
+
+class SpeedTestScreen(BoxLayout):
+    def __init__(self, **kw):
+        super().__init__(orientation="vertical",
+                         padding=dp(16), spacing=dp(10), **kw)
+        with self.canvas.before:
+            Color(*T("bg"))
+            self._bg = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=lambda *_: setattr(self._bg, "pos", self.pos),
+                  size=lambda *_: setattr(self._bg, "size", self.size))
+        Window.clearcolor = T("bg")
+
+        self._testing = False
+        self._build_header()
+        self._build_gauge()
+        self._build_value_label()
+        self._build_phase_label()
+        self._build_results_row()
+        self.add_widget(Label(size_hint_y=1))
+        self._build_start_button()
+
+    def _build_header(self):
+        hdr = BoxLayout(orientation="horizontal", size_hint_y=None,
+                        height=dp(44), spacing=dp(8))
+        btn_back = Button(
+            text="< Назад", font_size=dp(12),
+            background_normal="",
+            background_color=T("secondary"), color=T("text"),
+            size_hint=(None, 1), width=dp(84))
+        btn_back.bind(on_press=self._go_back)
+
+        title = Label(
+            text="Проверка скорости", font_size=dp(17), bold=True,
+            color=T("accent"), halign="center", valign="middle",
+            size_hint=(1, 1))
+        title.bind(size=lambda i, v: setattr(i, "text_size", (v[0], None)))
+
+        spacer = Widget(size_hint=(None, 1), width=dp(84))
+
+        hdr.add_widget(btn_back)
+        hdr.add_widget(title)
+        hdr.add_widget(spacer)
+        self.add_widget(hdr)
+
+    def _go_back(self, *_):
+        if self._testing:
+            return
+        try:
+            import main as loader_module
+            screen = loader_module.LoaderScreen()
+        except Exception:
+            screen = None
+        app  = App.get_running_app()
+        root = app.root
+        root.clear_widgets()
+        root.add_widget(screen if screen else MainScreen())
+
+    def _build_gauge(self):
+        wrap = BoxLayout(size_hint_y=None, height=dp(210))
+        self.gauge = SpeedGauge(size_hint=(1, 1))
+        wrap.add_widget(self.gauge)
+        self.add_widget(wrap)
+
+    def _build_value_label(self):
+        self.lbl_value = Label(
+            text="0.0", font_size=dp(38), bold=True, color=T("text"),
+            size_hint_y=None, height=dp(48))
+        self.lbl_unit = Label(
+            text="Мбит/с", font_size=dp(12), color=T("subtext"),
+            size_hint_y=None, height=dp(18))
+        self.add_widget(self.lbl_value)
+        self.add_widget(self.lbl_unit)
+
+    def _build_phase_label(self):
+        self.lbl_phase = Label(
+            text="Нажмите «Начать проверку»", font_size=dp(13),
+            color=T("subtext"), size_hint_y=None, height=dp(26))
+        self.add_widget(self.lbl_phase)
+
+    def _build_results_row(self):
+        row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
+        self.box_ping = SpeedResultBox("Пинг")
+        self.box_down = SpeedResultBox("Скачивание")
+        self.box_up   = SpeedResultBox("Отправка")
+        for b in (self.box_ping, self.box_down, self.box_up):
+            row.add_widget(b)
+        self.add_widget(row)
+
+    def _build_start_button(self):
+        self.btn_start = Button(
+            text=">> Начать проверку", font_size=dp(15), bold=True,
+            background_normal="",
+            background_color=T("btn"), color=T("btn_text"),
+            size_hint_y=None, height=dp(52))
+        self.btn_start.bind(on_press=self._on_start)
+        self.add_widget(self.btn_start)
+
+    def _on_start(self, *_):
+        if self._testing:
+            return
+        self._testing = True
+        self.btn_start.disabled = True
+        self.btn_start.text = "Идёт проверка..."
+        self.gauge.reset()
+        self.lbl_value.text = "0.0"
+        for b in (self.box_ping, self.box_down, self.box_up):
+            b.set("--", T("subtext"))
+        threading.Thread(target=self._run_test, daemon=True).start()
+
+    def _run_test(self):
+        host, port = SPEED_HOST, SPEED_PORT
+
+        Clock.schedule_once(lambda dt: self._phase("Измеряем пинг..."))
+        try:
+            ping_ms = speedtest_ping(host, port)
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._fail(f"Ошибка пинга: {e}"))
+            return
+        Clock.schedule_once(
+            lambda dt: self.box_ping.set(f"{ping_ms:.0f} мс", T("green")))
+
+        Clock.schedule_once(lambda dt: self._phase("Скачивание..."))
+        def on_down(bps):
+            mbps = bps_to_mbps(bps)
+            Clock.schedule_once(lambda dt: self._update_live(mbps))
+        try:
+            down_bps = speedtest_download(
+                host, port, SPEED_TEST_SIZE, on_progress=on_down)
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._fail(f"Ошибка скачивания: {e}"))
+            return
+        down_mbps = bps_to_mbps(down_bps)
+        Clock.schedule_once(
+            lambda dt: self.box_down.set(f"{down_mbps:.1f}", T("green")))
+
+        Clock.schedule_once(lambda dt: self._phase("Отправка..."))
+        def on_up(bps):
+            mbps = bps_to_mbps(bps)
+            Clock.schedule_once(lambda dt: self._update_live(mbps))
+        try:
+            up_bps = speedtest_upload(
+                host, port, SPEED_TEST_SIZE, on_progress=on_up)
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._fail(f"Ошибка отправки: {e}"))
+            return
+        up_mbps = bps_to_mbps(up_bps)
+        Clock.schedule_once(
+            lambda dt: self.box_up.set(f"{up_mbps:.1f}", T("green")))
+
+        Clock.schedule_once(lambda dt: self._finish())
+
+    def _phase(self, text):
+        self.lbl_phase.text = text
+
+    def _update_live(self, mbps):
+        self.gauge.set_value(mbps)
+        self.lbl_value.text = f"{mbps:.1f}"
+
+    def _fail(self, msg):
+        self.lbl_phase.text = msg
+        self.btn_start.disabled = False
+        self.btn_start.text = ">> Повторить попытку"
+        self._testing = False
+
+    def _finish(self):
+        self.lbl_phase.text = "Готово"
+        self.btn_start.disabled = False
+        self.btn_start.text = ">> Повторить проверку"
+        self._testing = False
