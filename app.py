@@ -1087,7 +1087,8 @@ class SpeedResultBox(BoxLayout):
 
 
 class SpeedTestScreen(BoxLayout):
-    def __init__(self, **kw):
+    def __init__(self, on_back=None, **kw):
+        self._on_back = on_back
         super().__init__(orientation="vertical",
                          padding=dp(16), spacing=dp(10), **kw)
         with self.canvas.before:
@@ -1131,6 +1132,9 @@ class SpeedTestScreen(BoxLayout):
 
     def _go_back(self, *_):
         if self._testing:
+            return
+        if self._on_back:
+            self._on_back()
             return
         try:
             import main as loader_module
